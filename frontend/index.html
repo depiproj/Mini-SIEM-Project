@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mini-SIEM v3 — Automated Security Dashboard</title>
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="logo">⚡ Mini-SIEM</span>
+      <span class="version-badge">v3.0</span>
+    </div>
+    <div class="topbar-right">
+      <span id="healthDot" class="health-dot offline" title="System status"></span>
+      <span id="healthText" class="health-text">Connecting…</span>
+      <button id="refreshAll" class="btn-icon" title="Refresh all">↻</button>
+    </div>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="dashboard">📊 Dashboard</button>
+    <button class="tab" data-tab="upload">📁 Upload Logs</button>
+    <button class="tab" data-tab="alerts">🚨 Alerts</button>
+    <button class="tab" data-tab="ioc">🔍 IOC Lookup</button>
+    <button class="tab" data-tab="ingest">➕ Manual Ingest</button>
+    <button class="tab" data-tab="ml">🤖 ML Analysis</button>
+  </nav>
+
+  <main id="app">
+
+    <!-- ── DASHBOARD TAB ─────────────────────────────────────────────────── -->
+    <section id="tab-dashboard" class="tab-content active">
+      <div class="stat-grid">
+        <div class="stat-card critical">
+          <div class="stat-num" id="stat-critical">—</div>
+          <div class="stat-label">Critical</div>
+        </div>
+        <div class="stat-card high">
+          <div class="stat-num" id="stat-high">—</div>
+          <div class="stat-label">High</div>
+        </div>
+        <div class="stat-card medium">
+          <div class="stat-num" id="stat-medium">—</div>
+          <div class="stat-label">Medium</div>
+        </div>
+        <div class="stat-card low">
+          <div class="stat-num" id="stat-low">—</div>
+          <div class="stat-label">Low</div>
+        </div>
+        <div class="stat-card info">
+          <div class="stat-num" id="stat-total">—</div>
+          <div class="stat-label">Total Alerts</div>
+        </div>
+        <div class="stat-card info">
+          <div class="stat-num" id="stat-uploads">—</div>
+          <div class="stat-label">Log Files Processed</div>
+        </div>
+        <div class="stat-card warn">
+          <div class="stat-num" id="stat-malicious">—</div>
+          <div class="stat-label">Malicious IOCs</div>
+        </div>
+        <div class="stat-card info">
+          <div class="stat-num" id="stat-ml">—</div>
+          <div class="stat-label">ML Status</div>
+        </div>
+      </div>
+
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head"><h3>MITRE ATT&CK Tactics</h3></div>
+          <div id="mitre-chart" class="bar-chart"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Top Source IPs</h3></div>
+          <div id="ip-chart" class="bar-chart"></div>
+        </div>
+      </div>
+
+      <div class="panel full-width">
+        <div class="panel-head">
+          <h3>Recent Alerts</h3>
+          <button class="btn-sm" onclick="loadDashboard()">Refresh</button>
+        </div>
+        <div id="recent-alerts"></div>
+      </div>
+    </section>
+
+    <!-- ── UPLOAD TAB ─────────────────────────────────────────────────────── -->
+    <section id="tab-upload" class="tab-content">
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head"><h3>Upload Log File</h3></div>
+          <div class="upload-zone" id="uploadZone">
+            <div class="upload-icon">📂</div>
+            <p>Drag & drop a log file here, or click to browse</p>
+            <p class="muted small">Supports: Syslog, Apache/Nginx, Linux auth.log, Windows Event Log (JSON/text), Generic text logs</p>
+            <input type="file" id="logFileInput" accept=".log,.txt,.json,.jsonl,.gz" style="display:none" />
+            <button class="btn" id="browseBtn">Browse File</button>
+          </div>
+          <div id="uploadProgress" style="display:none" class="progress-wrap">
+            <div class="progress-bar"><div class="progress-fill" id="progressFill"></div></div>
+            <p id="progressText" class="muted small">Processing…</p>
+          </div>
+          <div id="uploadResult"></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Upload History</h3><button class="btn-sm" id="refreshHistory">Refresh</button></div>
+          <div id="uploadHistory"><p class="muted">Loading…</p></div>
+        </div>
+      </div>
+
+      <div class="panel full-width" id="uploadAlertsPanel" style="display:none">
+        <div class="panel-head"><h3>Alerts Generated from Last Upload</h3></div>
+        <div id="uploadAlerts"></div>
+      </div>
+    </section>
+
+    <!-- ── ALERTS TAB ─────────────────────────────────────────────────────── -->
+    <section id="tab-alerts" class="tab-content">
+      <div class="panel full-width">
+        <div class="panel-head">
+          <h3>Alert Log</h3>
+          <div class="filter-row">
+            <select id="filterSeverity">
+              <option value="">All Severities</option>
+              <option value="Critical">Critical</option>
+              <option value="High">High</option>
+              <option value="Medium">Medium</option>
+              <option value="Low">Low</option>
+            </select>
+            <button class="btn-sm" id="applyFilter">Filter</button>
+            <button class="btn-sm" id="reloadAlerts">↻ Reload</button>
+          </div>
+        </div>
+        <div id="alertsTable"><p class="muted">Loading…</p></div>
+        <div class="pagination" id="pagination"></div>
+      </div>
+
+      <div id="alertDetailOverlay" class="overlay" style="display:none">
+        <div class="overlay-box">
+          <button class="close-btn" id="closeDetail">✕</button>
+          <h3>Alert Detail</h3>
+          <div id="alertDetailContent"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── IOC LOOKUP TAB ─────────────────────────────────────────────────── -->
+    <section id="tab-ioc" class="tab-content">
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head"><h3>IOC Reputation Lookup</h3></div>
+          <form id="iocForm" class="form">
+            <label>Enter IP address, domain, or hash (MD5/SHA1/SHA256)</label>
+            <input name="value" placeholder="e.g. 185.220.101.34 or malware.example.com" required />
+            <div class="quick-buttons">
+              <span class="muted small">Quick test:</span>
+              <button type="button" class="btn-tag" onclick="testIOC('185.220.101.34')">Known malicious IP</button>
+              <button type="button" class="btn-tag" onclick="testIOC('8.8.8.8')">Clean IP</button>
+              <button type="button" class="btn-tag" onclick="testIOC('malware.example.com')">Suspicious domain</button>
+            </div>
+            <button class="btn" type="submit">Lookup IOC</button>
+          </form>
+          <div id="iocResult" class="result-box"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>About IOC Enrichment</h3></div>
+          <div class="info-box">
+            <p>The Mini-SIEM queries multiple threat intelligence sources:</p>
+            <ul>
+              <li><strong>VirusTotal</strong> — file/URL/IP/domain reputation</li>
+              <li><strong>AbuseIPDB</strong> — IP abuse reports</li>
+              <li><strong>AlienVault OTX</strong> — threat pulses</li>
+            </ul>
+            <p>Without API keys, the system uses an intelligent offline simulation mode that never fails and provides realistic threat intelligence data for testing.</p>
+            <p class="muted small">Add API keys to <code>.env</code> to enable live lookups.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── MANUAL INGEST TAB ──────────────────────────────────────────────── -->
+    <section id="tab-ingest" class="tab-content">
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head"><h3>Manual Event Ingest</h3></div>
+          <form id="eventForm" class="form">
+            <label>Event Type</label>
+            <input name="event_type" placeholder="e.g. brute_force_login, port_scan, ransomware" required />
+            <label>Severity</label>
+            <select name="severity">
+              <option>Low</option><option selected>Medium</option>
+              <option>High</option><option>Critical</option>
+            </select>
+            <label>Source IP</label>
+            <input name="source_ip" placeholder="e.g. 192.168.1.105" required />
+            <label>Timestamp</label>
+            <input name="timestamp" id="timestampInput" required />
+            <label>Description</label>
+            <textarea name="description" rows="4" placeholder="Describe the event…" required></textarea>
+            <button class="btn" type="submit">Create Alert</button>
+          </form>
+          <div id="eventResult" class="result-box"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Quick Test Events</h3></div>
+          <div class="quick-events">
+            <button class="quick-event-btn" data-event='{"event_type":"brute_force","severity":"High","source_ip":"185.220.101.34","description":"Multiple failed SSH login attempts detected"}'>
+              🔨 Brute Force Attack
+            </button>
+            <button class="quick-event-btn" data-event='{"event_type":"port_scan","severity":"Medium","source_ip":"203.0.113.42","description":"Sequential port scan detected from external IP"}'>
+              🔭 Port Scan
+            </button>
+            <button class="quick-event-btn" data-event='{"event_type":"ransomware","severity":"Critical","source_ip":"10.0.0.66","description":"Ransomware encryption activity detected on endpoint"}'>
+              🦠 Ransomware
+            </button>
+            <button class="quick-event-btn" data-event='{"event_type":"privilege_escalation","severity":"Critical","source_ip":"192.168.1.200","description":"Unauthorized sudo escalation to root detected"}'>
+              ⬆️ Privilege Escalation
+            </button>
+            <button class="quick-event-btn" data-event='{"event_type":"data_exfiltration","severity":"Critical","source_ip":"198.51.100.77","description":"Large outbound data transfer to external IP"}'>
+              📤 Data Exfiltration
+            </button>
+            <button class="quick-event-btn" data-event='{"event_type":"lateral_movement","severity":"High","source_ip":"172.16.0.99","description":"Lateral movement via RDP detected in internal network"}'>
+              ↔️ Lateral Movement
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── ML ANALYSIS TAB ────────────────────────────────────────────────── -->
+    <section id="tab-ml" class="tab-content">
+      <div class="panel-row">
+        <div class="panel">
+          <div class="panel-head"><h3>Network Packet ML Classifier</h3></div>
+          <form id="packetForm" class="form two-col">
+            <div><label>Init Bwd Win Bytes</label><input name="Init_Bwd_Win_Bytes" type="number" step="any" value="0" /></div>
+            <div><label>Fwd IAT Min</label><input name="Fwd_IAT_Min" type="number" step="any" value="0" /></div>
+            <div><label>Init Fwd Win Bytes</label><input name="Init_Fwd_Win_Bytes" type="number" step="any" value="65535" /></div>
+            <div><label>Fwd Seg Size Min</label><input name="Fwd_Seg_Size_Min" type="number" step="any" value="20" /></div>
+            <div><label>Packet Length Min</label><input name="Packet_Length_Min" type="number" step="any" value="40" /></div>
+            <div><label>Fwd Packet Length Min</label><input name="Fwd_Packet_Length_Min" type="number" step="any" value="40" /></div>
+            <div><label>Bwd IAT Min</label><input name="Bwd_IAT_Min" type="number" step="any" value="0" /></div>
+            <div><label>PSH Flag Count</label><input name="PSH_Flag_Count" type="number" step="any" value="0" /></div>
+            <div><label>Bwd Packet Length Min</label><input name="Bwd_Packet_Length_Min" type="number" step="any" value="40" /></div>
+            <div><label>Protocol</label><input name="Protocol" type="number" step="any" value="6" /></div>
+            <button class="btn full" type="submit">Run ML Classification</button>
+          </form>
+          <div id="packetResult" class="result-box"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>ML Engine Info</h3></div>
+          <div id="mlInfo" class="info-box">
+            <p>Loading ML engine status…</p>
+          </div>
+          <div class="panel-head" style="margin-top:16px"><h3>Pre-set Scenarios</h3></div>
+          <div class="quick-events">
+            <button class="quick-packet-btn" data-features='{"Init_Bwd_Win_Bytes":65535,"Fwd_IAT_Min":100,"Init_Fwd_Win_Bytes":65535,"Packet_Length_Min":40,"Protocol":6}'>
+              📡 Normal HTTP Traffic
+            </button>
+            <button class="quick-packet-btn" data-features='{"Init_Bwd_Win_Bytes":0,"Fwd_IAT_Min":0,"Init_Fwd_Win_Bytes":0,"Packet_Length_Min":40,"PSH_Flag_Count":5,"Protocol":6}'>
+              🔭 Port Scan Pattern
+            </button>
+            <button class="quick-packet-btn" data-features='{"Init_Bwd_Win_Bytes":1460,"Fwd_IAT_Min":500,"Init_Fwd_Win_Bytes":8192,"Packet_Length_Min":1460,"PSH_Flag_Count":1,"Protocol":6}'>
+              📤 Large Data Transfer
+            </button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

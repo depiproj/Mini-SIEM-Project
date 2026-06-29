@@ -1,0 +1,1 @@
+This project uses a static frontend served by FastAPI. See ../index.html.
