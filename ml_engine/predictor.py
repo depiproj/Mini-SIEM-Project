@@ -52,24 +52,34 @@ def _load_model():
     return _model
 
 
-def predict_packet(features: dict) -> Optional[dict]:
-    # 🚨 PRESENTATION OVERRIDE (حركة صايعة للمناقشة)
+def _heuristic_fallback(features: dict) -> dict:
+    """
+    Rule-based fallback used ONLY when the trained model is unavailable
+    (missing file, load error, or ML_ENABLED=false). This is explicitly a
+    heuristic, not a model prediction — the caller is told so via
+    `"ml_enabled": False` so it is never confused with a real ML verdict.
+    """
     psh_flag = float(features.get("PSH Flag Count", 0.0))
     fwd_iat = float(features.get("Fwd IAT Min", 100.0))
     init_bwd = float(features.get("Init Bwd Win Bytes", 0.0))
-    
-    # سيناريو الـ Port Scan الجاهز (لما تضغطي عليه أو تحطي قيم متطرفة)
-    if psh_flag >= 5.0 or fwd_iat == 0.0:
-        return {"prediction": "PortScan", "is_malicious": True, "ml_enabled": True}
-        
-    # سيناريو الـ Large Data Transfer أو الـ DDoS
-    if init_bwd == 0.0 and psh_flag > 1.0:
-        return {"prediction": "DDoS-Attack", "is_malicious": True, "ml_enabled": True}
 
-    # لو الترافيك عادي، بنسيب السيستم يحاول يكلم الموديل الأصلي
+    if psh_flag >= 5.0 or fwd_iat == 0.0:
+        return {"prediction": "PortScan (heuristic)", "is_malicious": True, "ml_enabled": False}
+    if init_bwd == 0.0 and psh_flag > 1.0:
+        return {"prediction": "DDoS-Attack (heuristic)", "is_malicious": True, "ml_enabled": False}
+    return {"prediction": "Benign (heuristic)", "is_malicious": False, "ml_enabled": False}
+
+
+def predict_packet(features: dict) -> Optional[dict]:
+    """
+    Classify packet/flow features using the trained Random Forest model.
+    Falls back to a clearly-labelled heuristic only if the model itself
+    could not be loaded — the real model result is always used when available.
+    """
     model = _load_model()
     if model is None:
-        return {"prediction": "Benign", "is_malicious": False, "ml_enabled": True}
+        logger.warning("ML model unavailable — using heuristic fallback, not a real prediction.")
+        return _heuristic_fallback(features)
     try:
         row = np.array([[float(features.get(f, 0.0)) for f in TRAINED_FEATURES]])
         prediction = str(model.predict(row)[0])
@@ -77,4 +87,4 @@ def predict_packet(features: dict) -> Optional[dict]:
         return {"prediction": prediction, "is_malicious": is_malicious, "ml_enabled": True}
     except Exception as e:
         logger.error("ML prediction error: %s", e)
-        return {"prediction": "Benign", "is_malicious": False, "ml_enabled": True}
+        return _heuristic_fallback(features)

@@ -1,15 +1,5 @@
-"""
-main.py — Mini-SIEM v3 (Automated Full SIEM).
 
-Architecture:
-  ├── FastAPI core
-  ├── Log Upload & Parser      → POST /api/v1/upload-log
-  ├── Detection Engine         → Automatic alert generation
-  ├── MITRE ATT&CK Mapping
-  ├── IOC Extraction & Enrichment
-  ├── ML Engine (Random Forest)
-  └── Dashboard API
-"""
+import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
@@ -20,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from config import API_TITLE, API_VERSION, DEBUG, BASE_DIR
+from config import API_TITLE, API_VERSION, DEBUG, BASE_DIR, CORS_ORIGINS, RETENTION_DAYS
 from models.database import init_db
 from api.ingestion import router as ingestion_router
 from api.dashboard import router as dashboard_router
@@ -51,7 +41,18 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning("ML model pre-load skipped: %s", e)
 
+    retention_task = None
+    if RETENTION_DAYS > 0:
+        from services.retention import retention_loop
+        retention_task = asyncio.create_task(retention_loop(RETENTION_DAYS))
+        logger.info("Retention job started (purging data older than %d days).", RETENTION_DAYS)
+    else:
+        logger.info("Retention job disabled (RETENTION_DAYS=0).")
+
     yield
+
+    if retention_task is not None:
+        retention_task.cancel()
     logger.info("Shutting down Mini-SIEM.")
 
 
@@ -68,11 +69,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+logger.info("CORS allowed origins: %s", CORS_ORIGINS)
 
 app.include_router(ingestion_router)
 app.include_router(dashboard_router)

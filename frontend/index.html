@@ -10,11 +10,12 @@
   <header class="topbar">
     <div class="topbar-left">
       <span class="logo">⚡ Mini-SIEM</span>
-      <span class="version-badge">v3.0</span>
+      <span class="version-badge">v3.1</span>
     </div>
     <div class="topbar-right">
       <span id="healthDot" class="health-dot offline" title="System status"></span>
       <span id="healthText" class="health-text">Connecting…</span>
+      <button id="apiKeyBtn" class="btn-icon" title="Set API key">🔑</button>
       <button id="refreshAll" class="btn-icon" title="Refresh all">↻</button>
     </div>
   </header>
@@ -256,6 +257,18 @@
           <div id="mlInfo" class="info-box">
             <p>Loading ML engine status…</p>
           </div>
+          
+          <!-- ── HONEST NO ML DATA / PRIVACY NOTICE ────────────────────────── -->
+          <div class="info-box integrity-box" style="margin-top:16px; border-left: 4px solid #00bc8c; background: rgba(0, 188, 140, 0.1);">
+            <h4>🔒 Data Privacy & Transparency Statement</h4>
+            <p style="font-size: 0.9em; line-height: 1.4;">
+              <strong>Honest ML Processing:</strong> To preserve institutional privacy and data minimization standards, your uploaded raw security logs or packet fields are processed <strong>strictly in real-time</strong> for instant classification. 
+            </p>
+            <p style="font-size: 0.9em; line-height: 1.4; margin-top: 8px;">
+              No analysis payloads, logs, or network features are ever retained, stored, or synthesized to retrain background machine learning models. Standard alert logs remain fully under your local data retention controls.
+            </p>
+          </div>
+
           <div class="panel-head" style="margin-top:16px"><h3>Pre-set Scenarios</h3></div>
           <div class="quick-events">
             <button class="quick-packet-btn" data-features='{"Init_Bwd_Win_Bytes":65535,"Fwd_IAT_Min":100,"Init_Fwd_Win_Bytes":65535,"Packet_Length_Min":40,"Protocol":6}'>

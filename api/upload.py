@@ -7,14 +7,17 @@ POST /api/v1/upload-log
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import tempfile
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from api.auth import require_api_key
 from models.database import get_db
 from models.log_upload import LogUpload
 from models.alert import Alert
@@ -26,7 +29,7 @@ from services.enrichment import map_to_mitre
 from services.alert_service import _build_alert_from_detection
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/v1", tags=["Upload"])
+router = APIRouter(prefix="/api/v1", tags=["Upload"], dependencies=[Depends(require_api_key)])
 
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -64,6 +67,41 @@ async def upload_log(
     if file_size == 0:
         raise HTTPException(status_code=400, detail="Empty file")
 
+    # Dedup check — same bytes already processed successfully → don't
+    # re-run detection and mint duplicate alerts for the same log file.
+    content_hash = hashlib.sha256(content_bytes).hexdigest()
+    existing = await db.execute(
+        select(LogUpload).where(
+            LogUpload.content_hash == content_hash,
+            LogUpload.status == "done",
+        )
+    )
+    existing_upload = existing.scalars().first()
+    if existing_upload is not None:
+        logger.info(
+            "Duplicate upload detected (hash=%s) — returning cached result from upload_id=%d",
+            content_hash[:12], existing_upload.id,
+        )
+        alerts_result = await db.execute(
+            select(Alert.id).where(Alert.upload_id == existing_upload.id)
+        )
+        alert_ids = [row[0] for row in alerts_result.all()]
+        return UploadResponse(
+            upload_id=existing_upload.id,
+            filename=existing_upload.filename,
+            log_format=existing_upload.log_format,
+            total_events=existing_upload.total_events,
+            total_alerts=existing_upload.total_alerts,
+            alerts_created=alert_ids,
+            iocs_found=IOCSummary(ips=[], domains=[], urls=[], hashes=[]),
+            detections_summary=[],
+            message=(
+                f"This exact file was already processed as upload #{existing_upload.id} "
+                f"({existing_upload.total_alerts} alerts). Skipped re-processing to avoid "
+                f"duplicate alerts."
+            ),
+        )
+
     # Decode — try UTF-8 first, fall back to latin-1
     try:
         content = content_bytes.decode("utf-8")
@@ -75,6 +113,7 @@ async def upload_log(
         filename=filename,
         log_format="detecting",
         file_size=file_size,
+        content_hash=content_hash,
         status="processing",
     )
     db.add(upload_record)
@@ -101,12 +140,21 @@ async def upload_log(
         detections = run_detection(events)
         logger.info("Detection engine produced %d detections", len(detections))
 
+        # ── Behavioral ML scoring (real, per-batch, per-source-IP) ─────────────
+        # See ml_engine/behavior_model.py for what this is and its limitations —
+        # it is NOT the network-flow Random Forest model; log events have no
+        # packet-level features to feed that model honestly.
+        from ml_engine.behavior_model import score_ip_behavior
+        behavior_scores = score_ip_behavior(events)
+
         # ── Generate Alerts ────────────────────────────────────────────────────
         created_alert_ids = []
         detections_summary = []
 
         for detection in detections:
-            alert = await _build_alert_from_detection(detection, upload_id, db)
+            alert = await _build_alert_from_detection(
+                detection, upload_id, db, behavior_scores=behavior_scores
+            )
             created_alert_ids.append(alert.id)
             detections_summary.append({
                 "rule": detection.rule_name,

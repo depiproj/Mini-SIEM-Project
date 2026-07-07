@@ -9,6 +9,8 @@ Implements detections with MITRE ATT&CK mappings:
   - Privilege Escalation (T1548.003)
   - Credential Stuffing (T1110.004)
   - Impossible Login / Auth Anomalies
+  - DoS / DDoS Flood (T1498)
+  - SQL Injection / XSS / Path Traversal (T1190)
 
 Each detection returns a list of DetectionResult objects.
 """
@@ -20,8 +22,23 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import unquote
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
+    """Best-effort parse of the many timestamp formats produced by the parser."""
+    if not ts:
+        return None
+    try:
+        cleaned = ts.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(cleaned)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
 
 
 @dataclass
@@ -211,6 +228,218 @@ def detect_port_scan(events: list[dict]) -> list[DetectionResult]:
                 timestamp=_now_iso(),
                 evidence=[],
                 related_ips=list(dests)[:10],
+            ))
+
+    return results
+
+
+# ── Rule 3b: DoS / DDoS Flood (T1498) ─────────────────────────────────────────
+
+DOS_SINGLE_IP_THRESHOLD = 50        # requests from one IP to count as a flood
+DOS_TIME_WINDOW_SECONDS = 60        # window in which that volume is suspicious
+DDOS_MIN_DISTINCT_IPS = 10          # distinct attacking IPs to call it "distributed"
+DDOS_MIN_TOTAL_REQUESTS = 150       # minimum aggregate requests against one target
+
+_TRAFFIC_EVENT_TYPES = {"http_request", "http_error", "generic_log", "syslog_event"}
+
+
+def _time_span_seconds(events: list[dict]) -> Optional[float]:
+    times = sorted(t for t in (_parse_ts(e.get("timestamp")) for e in events) if t)
+    if len(times) < 2:
+        return None
+    return (times[-1] - times[0]).total_seconds()
+
+
+def detect_ddos(events: list[dict]) -> list[DetectionResult]:
+    """
+    Detect volumetric Denial-of-Service activity.
+    MITRE T1498 - Network Denial of Service
+
+    Two patterns:
+      1. Single-source flood: one IP firing a very high number of requests
+         in a short time window.
+      2. Distributed flood (DDoS): many distinct source IPs all hitting the
+         same target in a short window.
+    """
+    results: list[DetectionResult] = []
+
+    ip_events: dict[str, list[dict]] = defaultdict(list)
+    target_events: dict[str, list[dict]] = defaultdict(list)
+
+    for e in events:
+        evt = e.get("event_type", "")
+        if evt in ("port_scan", "network_scan"):
+            continue  # that's reconnaissance, not a flood — handled elsewhere
+        ip = e.get("source_ip")
+        if not ip or ip == "0.0.0.0":
+            continue
+        if evt not in _TRAFFIC_EVENT_TYPES and e.get("log_format") not in ("apache", "nginx"):
+            continue
+
+        ip_events[ip].append(e)
+        target = e.get("dest_ip") or (e.get("command") or "").split(" ")[-1] or "unknown_target"
+        target_events[target].append(e)
+
+    # Pattern 1 — single-source flood
+    for ip, evts in ip_events.items():
+        if len(evts) < DOS_SINGLE_IP_THRESHOLD:
+            continue
+        span = _time_span_seconds(evts)
+        if span is not None and span > DOS_TIME_WINDOW_SECONDS:
+            continue  # high volume but spread over a long time — not a flood
+        severity = "Critical" if len(evts) >= DOS_SINGLE_IP_THRESHOLD * 3 else "High"
+        rate_desc = f"{len(evts)} requests in {span:.1f}s" if span else f"{len(evts)} requests"
+        results.append(DetectionResult(
+            rule_name="DoS Flood",
+            severity=severity,
+            event_type="ddos",
+            source_ip=ip,
+            description=(
+                f"Denial-of-Service flood detected: {rate_desc} from {ip}. "
+                f"This exceeds the normal request rate for a single source."
+            ),
+            mitre_technique_id="T1498",
+            mitre_technique_name="Network Denial of Service",
+            mitre_tactic="Impact",
+            timestamp=evts[-1].get("timestamp", _now_iso()),
+            evidence=[x.get("raw_line", "")[:120] for x in evts[:5]],
+        ))
+
+    # Pattern 2 — distributed flood against one target
+    for target, evts in target_events.items():
+        distinct_ips = {x.get("source_ip") for x in evts if x.get("source_ip")}
+        if len(distinct_ips) < DDOS_MIN_DISTINCT_IPS or len(evts) < DDOS_MIN_TOTAL_REQUESTS:
+            continue
+        span = _time_span_seconds(evts)
+        if span is not None and span > DOS_TIME_WINDOW_SECONDS * 5:
+            continue
+        window_desc = f" within {span:.1f}s" if span else ""
+        results.append(DetectionResult(
+            rule_name="Distributed Denial of Service (DDoS)",
+            severity="Critical",
+            event_type="ddos",
+            source_ip=next(iter(distinct_ips)),
+            description=(
+                f"DDoS detected against '{target}': {len(evts)} requests from "
+                f"{len(distinct_ips)} distinct source IPs{window_desc}."
+            ),
+            mitre_technique_id="T1498",
+            mitre_technique_name="Network Denial of Service",
+            mitre_tactic="Impact",
+            timestamp=evts[-1].get("timestamp", _now_iso()),
+            evidence=[],
+            related_ips=list(distinct_ips)[:10],
+        ))
+
+    return results
+
+
+# ── Rule 3c: Web Application Attacks — SQLi / XSS / Path Traversal (T1190) ────
+
+_SQLI_PATTERNS = [
+    re.compile(r"union\s+select", re.IGNORECASE),
+    re.compile(r"select\s+.+\s+from\s+", re.IGNORECASE),
+    re.compile(r"\bor\s+1\s*=\s*1\b", re.IGNORECASE),
+    re.compile(r"drop\s+table", re.IGNORECASE),
+    re.compile(r"sleep\(\s*\d+\s*\)", re.IGNORECASE),
+    re.compile(r"(%27)|(\-\-\s)|(%23)|(#)"),
+    re.compile(r"information_schema", re.IGNORECASE),
+]
+
+_XSS_PATTERNS = [
+    re.compile(r"<script", re.IGNORECASE),
+    re.compile(r"javascript\s*:", re.IGNORECASE),
+    re.compile(r"on(error|load|mouseover)\s*=", re.IGNORECASE),
+    re.compile(r"<img[^>]+src", re.IGNORECASE),
+    re.compile(r"document\.cookie", re.IGNORECASE),
+]
+
+_PATH_TRAVERSAL_PATTERNS = [
+    re.compile(r"\.\./"),
+    re.compile(r"%2e%2e%2f", re.IGNORECASE),
+    re.compile(r"\.\.\\\\"),
+    re.compile(r"etc/passwd", re.IGNORECASE),
+]
+
+
+def detect_web_attacks(events: list[dict]) -> list[DetectionResult]:
+    """
+    Detect SQL Injection, XSS, and Path Traversal attempts in HTTP request lines.
+    MITRE T1190 - Exploit Public-Facing Application
+    """
+    results: list[DetectionResult] = []
+    _WEB_EVENT_TYPES = {"http_request", "http_error"}
+    _WEB_LOG_FORMATS = {"apache", "nginx"}
+
+    for e in events:
+        # Only inspect actual HTTP request lines — a sudo command like
+        # `cat /etc/passwd` is a local admin action, not a web path-traversal
+        # attempt, even though it contains the same substring.
+        if e.get("event_type") not in _WEB_EVENT_TYPES and e.get("log_format") not in _WEB_LOG_FORMATS:
+            continue
+
+        cmd = e.get("command") or ""
+        if not cmd:
+            continue
+        ip = e.get("source_ip", "0.0.0.0")
+        ts = e.get("timestamp", _now_iso())
+
+        # Attackers routinely percent-encode payloads (e.g. "UNION%20SELECT",
+        # "%3C%73%63%72%69%70%74") specifically to slip past naive string
+        # matching. Decode before matching so encoding alone can't evade
+        # detection. unquote() is safe to call even on already-plain text.
+        decoded_cmd = unquote(cmd)
+
+        sqli_hits = [p.pattern for p in _SQLI_PATTERNS if p.search(decoded_cmd)]
+        xss_hits = [p.pattern for p in _XSS_PATTERNS if p.search(decoded_cmd)]
+        trav_hits = [p.pattern for p in _PATH_TRAVERSAL_PATTERNS if p.search(decoded_cmd)]
+
+        if sqli_hits:
+            results.append(DetectionResult(
+                rule_name="SQL Injection Attempt",
+                severity="Critical",
+                event_type="sql_injection",
+                source_ip=ip,
+                description=(
+                    f"Possible SQL injection from {ip}. Request: {cmd[:200]}"
+                ),
+                mitre_technique_id="T1190",
+                mitre_technique_name="Exploit Public-Facing Application",
+                mitre_tactic="Initial Access",
+                timestamp=ts,
+                evidence=[cmd[:200]],
+            ))
+
+        if xss_hits:
+            results.append(DetectionResult(
+                rule_name="Cross-Site Scripting (XSS) Attempt",
+                severity="High",
+                event_type="xss",
+                source_ip=ip,
+                description=(
+                    f"Possible XSS payload from {ip}. Request: {cmd[:200]}"
+                ),
+                mitre_technique_id="T1059.007",
+                mitre_technique_name="JavaScript",
+                mitre_tactic="Execution",
+                timestamp=ts,
+                evidence=[cmd[:200]],
+            ))
+
+        if trav_hits:
+            results.append(DetectionResult(
+                rule_name="Path Traversal Attempt",
+                severity="High",
+                event_type="path_traversal",
+                source_ip=ip,
+                description=(
+                    f"Possible directory/path traversal from {ip}. Request: {cmd[:200]}"
+                ),
+                mitre_technique_id="T1083",
+                mitre_technique_name="File and Directory Discovery",
+                mitre_tactic="Discovery",
+                timestamp=ts,
+                evidence=[cmd[:200]],
             ))
 
     return results
@@ -525,17 +754,45 @@ def run_ml_on_events(events: list[dict]) -> list[DetectionResult]:
     results = []
     try:
         from ml_engine.predictor import predict_packet
+
+        # Real inter-arrival time (ms) between consecutive events from the
+        # same source IP. This used to be hardcoded to 0 for every event,
+        # which silently satisfied the model's "PortScan" fast-path on every
+        # single call — i.e. the ML stage always fired regardless of actual
+        # behavior. Deriving it from real timestamps makes the signal honest.
+        by_ip: dict[str, list[dict]] = defaultdict(list)
+        for e in events:
+            ip = e.get("source_ip") or "0.0.0.0"
+            by_ip[ip].append(e)
+
+        min_iat_by_event_id: dict[int, float] = {}
+        for ip, evts in by_ip.items():
+            timed = sorted(
+                ((_parse_ts(e.get("timestamp")), e) for e in evts),
+                key=lambda pair: (pair[0] is None, pair[0]),
+            )
+            prev_ts = None
+            for ts, e in timed:
+                if prev_ts is not None and ts is not None:
+                    delta_ms = max((ts - prev_ts).total_seconds() * 1000.0, 0.0)
+                else:
+                    delta_ms = 100.0  # neutral default — matches predictor's own default
+                min_iat_by_event_id[id(e)] = delta_ms
+                prev_ts = ts if ts is not None else prev_ts
+
         malicious_events = []
         for e in events:
-            # Build minimal feature dict from event metadata
+            # Build feature dict from real event metadata where we have it,
+            # and neutral (non-triggering) defaults where we genuinely don't
+            # have packet-level data — this is a log-based SIEM, not a NIDS.
             features = {
-                "Init Bwd Win Bytes": 0,
-                "Fwd IAT Min": 0,
-                "Init Fwd Win Bytes": 0,
-                "Fwd Seg Size Min": 0,
+                "Init Bwd Win Bytes": 65535,
+                "Fwd IAT Min": min_iat_by_event_id.get(id(e), 100.0),
+                "Init Fwd Win Bytes": 65535,
+                "Fwd Seg Size Min": 20,
                 "Packet Length Min": len(e.get("raw_line", "")),
                 "Fwd Packet Length Min": 0,
-                "Bwd IAT Min": 0,
+                "Bwd IAT Min": 100,
                 "PSH Flag Count": 1 if e.get("action") == "login_failure" else 0,
                 "Bwd Packet Length Min": 0,
                 "Protocol": 6,
@@ -585,6 +842,8 @@ def run_detection(events: list[dict]) -> list[DetectionResult]:
         detect_brute_force,
         detect_password_spray,
         detect_port_scan,
+        detect_ddos,
+        detect_web_attacks,
         detect_powershell_abuse,
         detect_suspicious_auth,
         detect_privilege_escalation,

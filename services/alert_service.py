@@ -33,16 +33,21 @@ async def process_event(event: EventPayload, db: AsyncSession) -> Alert:
     enriched = await enrich_event(event, classification.severity)
 
     # ── Stage 3: ML Prediction ────────────────────────────────────────────────
+    # Only runs if the caller supplied genuine network-flow features. Log
+    # events (the vast majority of alerts here) have no such data, so
+    # ml_prediction stays None for them rather than being fed a fabricated
+    # feature vector that would always yield the same meaningless verdict.
     ml_prediction   = None
     ml_is_malicious = None
-    try:
-        from ml_engine.predictor import predict_packet
-        ml_result = predict_packet({})
-        if ml_result and ml_result.get("ml_enabled"):
-            ml_prediction   = ml_result.get("prediction")
-            ml_is_malicious = ml_result.get("is_malicious")
-    except Exception as e:
-        logger.warning("ML stage skipped: %s", e)
+    if event.network_features:
+        try:
+            from ml_engine.predictor import predict_packet
+            ml_result = predict_packet(event.network_features)
+            if ml_result and ml_result.get("ml_enabled"):
+                ml_prediction   = ml_result.get("prediction")
+                ml_is_malicious = ml_result.get("is_malicious")
+        except Exception as e:
+            logger.warning("ML stage skipped: %s", e)
 
     # ── Stage 4: Persist ──────────────────────────────────────────────────────
     alert = Alert(
@@ -83,6 +88,7 @@ async def _build_alert_from_detection(
     detection,
     upload_id: int,
     db: AsyncSession,
+    behavior_scores: dict | None = None,
 ) -> Alert:
     """
     Create an Alert ORM object from a DetectionResult (from detection engine).
@@ -93,21 +99,24 @@ async def _build_alert_from_detection(
     # IOC enrichment
     ioc = await lookup_ioc(detection.source_ip)
 
-    # ML prediction (best-effort)
+    # ML prediction: log-parsed detections (brute force, sudo abuse, etc.) have
+    # no network-flow telemetry, so we never feed them into the packet-level
+    # Random Forest model (ml_engine/predictor.py) — that would mean making up
+    # numbers, which is what caused every alert to previously show "Benign".
+    #
+    # Instead, `behavior_scores` (computed once per upload batch by
+    # ml_engine/behavior_model.score_ip_behavior) holds a genuine, data-backed
+    # anomaly verdict per source IP, built from real counts in this file:
+    # failed logins, distinct accounts targeted, distinct destinations, event
+    # rate. If that's unavailable for some reason, ml_prediction stays None
+    # rather than falling back to a fabricated value.
     ml_prediction   = None
     ml_is_malicious = None
-    try:
-        from ml_engine.predictor import predict_packet
-        ml_result = predict_packet({
-            "PSH_Flag_Count": 1 if "brute" in detection.event_type.lower() else 0,
-            "Packet Length Min": 40,
-            "Protocol": 6,
-        })
-        if ml_result and ml_result.get("ml_enabled"):
-            ml_prediction   = ml_result.get("prediction")
-            ml_is_malicious = ml_result.get("is_malicious")
-    except Exception:
-        pass
+    if behavior_scores:
+        ip_score = behavior_scores.get(detection.source_ip)
+        if ip_score:
+            ml_prediction   = f"{ip_score['prediction']} ({ip_score['method']})"
+            ml_is_malicious = ip_score["is_malicious"]
 
     alert = Alert(
         event_type  = detection.event_type,

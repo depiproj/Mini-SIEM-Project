@@ -14,6 +14,12 @@ class EventPayload(BaseModel):
     source_ip:   str = Field(..., example="192.168.1.105")
     timestamp:   str = Field(..., example="2024-07-15T14:23:01Z")
     description: str = Field(..., min_length=1, example="Multiple failed SSH login attempts.")
+    # Optional: only populate this if the caller genuinely has network-flow
+    # telemetry (packet length, IAT, window bytes, flags — the features the
+    # Random Forest model was trained on). Text log lines don't have this
+    # data, so leave it unset for log-derived events — ML will simply be
+    # skipped rather than fed made-up numbers.
+    network_features: Optional[dict] = Field(default=None, example=None)
 
     @field_validator("severity")
     @classmethod

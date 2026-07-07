@@ -38,7 +38,25 @@ ML_MODEL_PATH: str = os.getenv(
 )
 ML_ENABLED: bool = os.getenv("ML_ENABLED", "true").lower() == "true"
 
+# ── Auth ──────────────────────────────────────────────────────────────────────
+# Shared-secret API key required via the 'X-API-Key' header. Leave blank to
+# disable auth for local development (a warning is logged when this happens).
+API_KEY: str = os.getenv("API_KEY", "")
+
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Comma-separated list of allowed origins, e.g. "https://dashboard.example.com".
+# Defaults to localhost-only so the API isn't wide open by default.
+_default_cors = "http://localhost:8000,http://127.0.0.1:8000"
+CORS_ORIGINS: list[str] = [
+    o.strip() for o in os.getenv("CORS_ORIGINS", _default_cors).split(",") if o.strip()
+]
+
+# ── Data Retention ────────────────────────────────────────────────────────────
+# Alerts and upload records older than this many days are purged by the
+# retention job. Set to 0 to disable automatic purging.
+RETENTION_DAYS: int = int(os.getenv("RETENTION_DAYS", "90"))
+
 # ── App ───────────────────────────────────────────────────────────────────────
 API_TITLE: str    = "Mini-SIEM Alerting System"
-API_VERSION: str  = "3.0.0"
+API_VERSION: str  = "3.1.0"
 DEBUG: bool       = os.getenv("DEBUG", "true").lower() == "true"

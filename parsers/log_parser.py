@@ -286,10 +286,19 @@ def _enrich_auth_message(event: dict, msg: str) -> None:
         event["action"] = "account_creation"
         return
 
-    # generic — extract any IPs
+    # generic — extract any IPs. Real-world syslog/auth files often contain
+    # mixed content (SSH lines alongside firewall/kernel connection lines),
+    # but the whole file gets classified under one dominant format. Without
+    # this, network-scan-style lines lose their dest_ip and become invisible
+    # to detect_port_scan(), even though the port-scan rule handles auth_log
+    # format events just fine otherwise.
     ips = _extract_ips(msg)
     if ips and not event.get("source_ip"):
         event["source_ip"] = ips[0]
+    if len(ips) >= 2 and not event.get("dest_ip"):
+        event["dest_ip"] = ips[1]
+        if "connection" in msg.lower() or "scan" in msg.lower() or "attempt" in msg.lower():
+            event["event_type"] = "network_connection"
 
 
 def parse_auth_log(content: str) -> list[dict]:

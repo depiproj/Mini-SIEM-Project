@@ -9,10 +9,19 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
 
-# ── Override DB to in-memory SQLite before importing app ─────────────────────
+# ── Force isolated test environment ───────────────────────────────────────────
+# NOTE: we use direct assignment (not setdefault) because a real .env file
+# (e.g. one with production DATABASE_URL / API keys) is loaded by config.py
+# on import and WILL already be present in os.environ by the time this file
+# runs. setdefault() would then silently do nothing, and tests would quietly
+# run against the real database / real external APIs instead of an isolated
+# in-memory one. That previously caused intermittent "database is locked"
+# failures whenever a real server process was also running against siem.db.
 import os
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-os.environ.setdefault("VIRUSTOTAL_API_KEY", "")   # force simulation layer
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+os.environ["VIRUSTOTAL_API_KEY"] = ""    # force simulation layer
+os.environ["ABUSEIPDB_API_KEY"] = ""
+os.environ["OTX_API_KEY"] = ""
 
 from main import app
 from models.database import init_db, engine, Base

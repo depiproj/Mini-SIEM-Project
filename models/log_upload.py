@@ -12,6 +12,7 @@ class LogUpload(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     log_format: Mapped[str] = mapped_column(String(50), nullable=False)
     file_size: Mapped[int] = mapped_column(Integer, nullable=True)
     total_events: Mapped[int] = mapped_column(Integer, default=0)
